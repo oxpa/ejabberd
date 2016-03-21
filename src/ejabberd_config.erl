@@ -5,7 +5,7 @@
 %%% Created : 14 Dec 2002 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2015   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2016   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -69,8 +69,7 @@ start() ->
     State0 = read_file(Config),
     State = validate_opts(State0),
     %% This start time is used by mod_last:
-    {MegaSecs, Secs, _} = now(),
-    UnixTime = MegaSecs*1000000 + Secs,
+    UnixTime = p1_time_compat:system_time(seconds),
     SharedKey = case erlang:get_cookie() of
                     nocookie ->
                         p1_sha:sha(randoms:get_string());
@@ -113,7 +112,7 @@ get_env_config() ->
 %% @doc Read the ejabberd configuration file.
 %% It also includes additional configuration files and replaces macros.
 %% This function will crash if finds some error in the configuration file.
-%% @spec (File::string()) -> #state{}.
+%% @spec (File::string()) -> #state{}
 read_file(File) ->
     read_file(File, [{replace_macros, true},
                      {include_files, true},
@@ -163,7 +162,7 @@ convert_to_yaml(File, Output) ->
                          fun({Host, Opts1}) ->
                                  {host_config, [{Host, Opts1}]}
                          end, HOpts),
-    Data = p1_yaml:encode(lists:reverse(NewOpts)),
+    Data = fast_yaml:encode(lists:reverse(NewOpts)),
     case Output of
         stdout ->
             io:format("~s~n", [Data]);
@@ -192,7 +191,6 @@ env_binary_to_list(Application, Parameter) ->
 %% Returns a list of plain terms,
 %% in which the options 'include_config_file' were parsed
 %% and the terms in those files were included.
-%% @spec(string()) -> [term()]
 %% @spec(iolist()) -> [term()]
 get_plain_terms_file(File) ->
     get_plain_terms_file(File, [{include_files, true}]).
@@ -228,14 +226,14 @@ get_plain_terms_file(File1, Opts) ->
 consult(File) ->
     case filename:extension(File) of
         Ex when (Ex == ".yml") or (Ex == ".yaml") ->
-            case p1_yaml:decode_from_file(File, [plain_as_atom]) of
+            case fast_yaml:decode_from_file(File, [plain_as_atom]) of
                 {ok, []} ->
                     {ok, []};
                 {ok, [Document|_]} ->
                     {ok, parserl(Document)};
                 {error, Err} ->
                     Msg1 = "Cannot load " ++ File ++ ": ",
-                    Msg2 = p1_yaml:format_error(Err),
+                    Msg2 = fast_yaml:format_error(Err),
                     {error, Msg1 ++ Msg2}
             end;
         _ ->
@@ -307,7 +305,7 @@ normalize_hosts(Hosts) ->
 normalize_hosts([], PrepHosts) ->
     lists:reverse(PrepHosts);
 normalize_hosts([Host|Hosts], PrepHosts) ->
-    case jlib:nodeprep(iolist_to_binary(Host)) of
+    case jid:nodeprep(iolist_to_binary(Host)) of
 	error ->
 	    ?ERROR_MSG("Can't load config file: "
 		       "invalid host name [~p]", [Host]),
@@ -373,18 +371,27 @@ exit_or_halt(ExitText) ->
 
 get_config_option_key(Name, Val) ->
     if Name == listen ->
-            lists:foldl(
-              fun({port, Port}, {_, IP, T, Mod}) ->
-                      {Port, IP, T, Mod};
-                 ({ip, IP}, {Port, _, T, Mod}) ->
-                      {Port, IP, T, Mod};
-                 ({transport, T}, {Port, IP, _, Mod}) ->
-                      {Port, IP, T, Mod};
-                 ({module, Mod}, {Port, IP, T, _}) ->
-                      {Port, IP, T, Mod};
-                 (_, Res) ->
-                      Res
-              end, {5222, {0,0,0,0}, tcp, ejabberd_c2s}, Val);
+            case Val of
+                {{Port, IP, Trans}, _Mod, _Opts} ->
+                    {Port, IP, Trans};
+                {{Port, Trans}, _Mod, _Opts} when Trans == tcp; Trans == udp ->
+                    {Port, {0,0,0,0}, Trans};
+                {{Port, IP}, _Mod, _Opts} ->
+                    {Port, IP, tcp};
+                {Port, _Mod, _Opts} ->
+                    {Port, {0,0,0,0}, tcp};
+                V when is_list(V) ->
+                    lists:foldl(
+                      fun({port, Port}, {_, IP, T}) ->
+                              {Port, IP, T};
+                         ({ip, IP}, {Port, _, T}) ->
+                              {Port, IP, T};
+                         ({transport, T}, {Port, IP, _}) ->
+                              {Port, IP, T};
+                         (_, Res) ->
+                              Res
+                      end, {5222, {0,0,0,0}, tcp}, Val)
+            end;
        is_tuple(Val) ->
             element(1, Val);
        true ->
@@ -400,9 +407,8 @@ maps_to_lists(IMap) ->
                       [{Name, Val} | Res]
               end, [], IMap).
 
-
 merge_configs(Terms, ResMap) ->
-    lists:foldl(fun({Name, Val}, Map) when is_list(Val) ->
+    lists:foldl(fun({Name, Val}, Map) when is_list(Val), Name =/= auth_method ->
                         Old = maps:get(Name, Map, #{}),
                         New = lists:foldl(fun(SVal, OMap) ->
                                                   NVal = if Name == host_config orelse Name == append_host_config ->
@@ -418,7 +424,6 @@ merge_configs(Terms, ResMap) ->
                    ({Name, Val}, Map) ->
                         maps:put(Name, Val, Map)
                 end, ResMap, Terms).
-
 
 %% @doc Include additional configuration files in the list of terms.
 %% @spec ([term()]) -> [term()]
@@ -437,8 +442,8 @@ include_config_files(Terms) ->
                        include_config_file(File, Opts)
                end, lists:flatten(FileOpts)),
 
-    M1 = merge_configs(Terms1, #{}),
-    M2 = merge_configs(Terms2, M1),
+    M1 = merge_configs(transform_terms(Terms1), #{}),
+    M2 = merge_configs(transform_terms(Terms2), M1),
     maps_to_lists(M2).
 
 transform_include_option({include_config_file, File}) when is_list(File) ->
@@ -844,6 +849,7 @@ replace_module(mod_roster_odbc) -> {mod_roster, odbc};
 replace_module(mod_shared_roster_odbc) -> {mod_shared_roster, odbc};
 replace_module(mod_vcard_odbc) -> {mod_vcard, odbc};
 replace_module(mod_vcard_xupdate_odbc) -> {mod_vcard_xupdate, odbc};
+replace_module(mod_pubsub_odbc) -> {mod_pubsub, odbc};
 replace_module(Module) ->
     case is_elixir_module(Module) of
         true  -> expand_elixir_module(Module);

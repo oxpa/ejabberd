@@ -5,7 +5,7 @@
 %%% Created : 21 Aug 2007 by Badlop <badlop@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2015   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2016   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -228,13 +228,13 @@ process(_, #request{method = 'POST', data = Data, opts = Opts}) ->
         end,
     GetAuth = true,
     State = #state{access_commands = AccessCommands, get_auth = GetAuth},
-    case xml_stream:parse_element(Data) of
+    case fxml_stream:parse_element(Data) of
 	{error, _} ->
 	    {400, [],
 	     #xmlel{name = <<"h1">>, attrs = [],
 		    children = [{xmlcdata, <<"Malformed XML">>}]}};
 	El ->
-	    case p1_xmlrpc:decode(El) of
+	    case fxmlrpc:decode(El) of
 		{error, _} = Err ->
 		    ?ERROR_MSG("XML-RPC request ~s failed with reason: ~p",
 			       [Data, Err]),
@@ -244,7 +244,7 @@ process(_, #request{method = 'POST', data = Data, opts = Opts}) ->
 		{ok, RPC} ->
 		    ?DEBUG("got XML-RPC request: ~p", [RPC]),
 		    {false, Result} = handler(State, RPC),
-		    XML = xml:element_to_binary(p1_xmlrpc:encode(Result)),
+		    XML = fxml:element_to_binary(fxmlrpc:encode(Result)),
 		    {200, [{<<"Content-Type">>, <<"text/xml">>}],
 		     <<"<?xml version=\"1.0\"?>", XML/binary>>}
 	    end
@@ -491,7 +491,7 @@ format_result(Atom, {Name, atom}) ->
      [{Name, iolist_to_binary(atom_to_list(Atom))}]};
 format_result(Int, {Name, integer}) ->
     {struct, [{Name, Int}]};
-format_result(String, {Name, string}) when is_list(String) ->
+format_result([A|_]=String, {Name, string}) when is_list(String) and is_integer(A) ->
     {struct, [{Name, lists:flatten(String)}]};
 format_result(Binary, {Name, string}) when is_binary(Binary) ->
     {struct, [{Name, binary_to_list(Binary)}]};
