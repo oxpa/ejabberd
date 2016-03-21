@@ -43,7 +43,7 @@
 	 forget_room/3,
 	 create_room/5,
          get_rooms_by_vhost/1,
-         shutdown_rooms/1,
+	 shutdown_rooms/1,
 	 process_iq_disco_items/4,
 	 broadcast_service_message/2,
 	 export/1,
